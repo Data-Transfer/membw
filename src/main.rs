@@ -3,7 +3,7 @@
 //!
 //! * clone_from_slice, copy_from_slice, optimised avx copy are all on par with memcpy
 //! * default zero-based initialisation does not happen at vector declaration time
-//! * memory pages are not activated and initialised until one of their elements is touched 
+//! * memory pages are not activated and initialised until one of their elements is touched
 //! * copying into an uninitialised buffer is slower than into an initialised one
 //! * touching one element every <page size> elements before copying data between buffers makes the
 //!   first copy operation much faster
@@ -14,8 +14,8 @@
 //! * same results with C and Rust
 //! * multithreaded copy is faster but dependent on number of memory channels and number of cores
 
-use std::time::Instant;
 use std::ffi::*;
+use std::time::Instant;
 
 //-----------------------------------------------------------------------------
 // Need to move pointer to buffer element across threads
@@ -67,12 +67,39 @@ fn par_cp<T: 'static + Copy>(src: &[T], dst: &mut [T], n: usize) {
     }
 }
 //-----------------------------------------------------------------------------
+fn par_cp2<T: 'static + Copy>(src: &[T], dst: &mut [T], n: usize) {
+    assert!(src.len() % n == 0);
+    let mut th = vec![];
+    let cs = src.len() / n;
+    for i in 0..n {
+        unsafe {
+            let idx = (n * i) as isize;
+            let s = Movable(src.as_ptr().offset(idx));
+            let d = MovableMut(dst.as_mut_ptr().offset(idx));
+            th.push(std::thread::spawn(move || {
+                memcpy(
+                    d.get().unwrap() as *mut c_void,
+                    s.get().unwrap() as *const c_void,
+                    cs,
+                );
+            }))
+        }
+    }
+    for t in th {
+        t.join().unwrap();
+    }
+}
+//-----------------------------------------------------------------------------
 type size_t = usize;
-extern "C" { fn memcpy(dest: *mut c_void, src: *const c_void, n: size_t) -> *mut c_void; }
+extern "C" {
+    fn memcpy(dest: *mut c_void, src: *const c_void, n: size_t) -> *mut c_void;
+}
 fn cp(src: &[u8], dst: &mut [u8]) {
     unsafe {
-        memcpy( dst.as_mut_ptr() as *mut c_void,
-            src.as_ptr() as *const c_void, dst.len(),
+        memcpy(
+            dst.as_mut_ptr() as *mut c_void,
+            src.as_ptr() as *const c_void,
+            dst.len(),
         );
     }
 }
@@ -146,26 +173,51 @@ fn cp_avx<T: 'static + Copy>(src: &[T], dst: &mut [T]) {
 }
 //-----------------------------------------------------------------------------
 fn main() {
-const SIZE_U8: usize = 0x40000000;
+    let size = std::env::args()
+        .nth(1)
+        .expect("Missing buffer size")
+        .parse::<usize>()
+        .expect("Wrong number format");
+    let num_threads = std::env::args()
+        .nth(2)
+        .map_or(1, |a| a.parse::<usize>().expect("Wrong number format"));
     let init_value = 42_u8; // 0 results in an order of magnitude higher copy time and ~zero
                             // initialization time when using vec![]
+    println!("Initializing...");
     let t = Instant::now();
     // same performance with standard initialisation and page aligned buffers;
     // page aligned buffers are required for AVX2 copy
-    //let src = vec![init_value; SIZE_U8]; 
+    //let src = vec![init_value; SIZE_U8];
     //let mut dest = vec![init_value; SIZE_U8];
-    let src = page_aligned_vec::<u8>(SIZE_U8, SIZE_U8, Some(init_value));
-    let mut dest = page_aligned_vec::<u8>(SIZE_U8, SIZE_U8, Some(init_value));
-    let init_time = t.elapsed().as_millis();                                   
-    let t = Instant::now();
-    //cp_avx(&src, &mut dest);//, 16);
-    cp2(&src, &mut dest);
-    let e = t.elapsed().as_millis();
-    println!("{} ms, init: {} ms", e, init_time);
-    println!("{}", dest[page_size::get()]);
+    let src = page_aligned_vec::<u8>(size, size, Some(init_value));
+    let mut dest = page_aligned_vec::<u8>(size, size, Some(init_value));
+    let init_time = t.elapsed().as_secs_f64();
+    println!("Copying...");
+    let e = if num_threads == 1 {
+        let t = Instant::now();
+        cp2(&src, &mut dest);
+        t.elapsed().as_secs_f64()
+    } else {
+        let t = Instant::now();
+        par_cp2(&src, &mut dest, num_threads);
+        t.elapsed().as_secs_f64()
+    };
+    println!("output element at {}: {}", page_size::get(), dest[page_size::get()]);
+    // R/W 2 * measured BW
+    println!(
+        "{:.0} ms, {:.2} GiB/s, init: {:.2} s",
+        e * 1000.0,
+        2. * (size as f64 / 0x40000000 as f64) / e,
+        init_time
+    );
 }
 //-----------------------------------------------------------------------------
-pub fn aligned_vec<T: Sized + Copy>(size: usize, capacity: usize, align: usize, touch: Option<T>) -> Vec<T> {
+fn aligned_vec<T: Copy>(
+    size: usize,
+    capacity: usize,
+    align: usize,
+    touch: Option<T>,
+) -> Vec<T> {
     unsafe {
         if size == 0 {
             Vec::<T>::new()
@@ -176,12 +228,11 @@ pub fn aligned_vec<T: Sized + Copy>(size: usize, capacity: usize, align: usize, 
             let layout = std::alloc::Layout::from_size_align_unchecked(size, align);
             let raw_ptr = std::alloc::alloc(layout) as *mut T;
             if let Some(x) = touch {
-               let mut v = Vec::from_raw_parts(raw_ptr, size, capacity);
-               for i in (0..size).step_by(page_size::get()) {
-                   v[i] = x;
-               } 
-               v
-
+                let mut v = Vec::from_raw_parts(raw_ptr, size, capacity);
+                for i in (0..size).step_by(page_size::get()) {
+                    v[i] = x;
+                }
+                v
             } else {
                 //SLOW!
                 //nix::sys::mman::mlock(raw_ptr as *const c_void, size).unwrap();
@@ -191,6 +242,6 @@ pub fn aligned_vec<T: Sized + Copy>(size: usize, capacity: usize, align: usize, 
     }
 }
 //-----------------------------------------------------------------------------
-fn page_aligned_vec<T: Sized + Copy>(size: usize, capacity: usize, touch: Option<T>) -> Vec<T> {
+fn page_aligned_vec<T: Copy>(size: usize, capacity: usize, touch: Option<T>) -> Vec<T> {
     aligned_vec::<T>(size, capacity, page_size::get(), touch)
 }
