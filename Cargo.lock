@@ -3,6 +3,15 @@
 version = 3
 
 [[package]]
+name = "aligned_vec"
+version = "0.1.0"
+source = "git+https://github.com/uv-rust/aligned_vec#8345440c3542e691d0684f218c62ea553c35d684"
+dependencies = [
+ "nix",
+ "page_size",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -30,7 +39,7 @@ checksum = "349d5a591cd28b49e1d1037471617a32ddcda5731b99419008085f72d5a53836"
 name = "memcpy"
 version = "0.1.0"
 dependencies = [
- "nix",
+ "aligned_vec",
  "page_size",
 ]
 

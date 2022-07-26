@@ -16,11 +16,12 @@
 
 use std::ffi::*;
 use std::time::Instant;
+use aligned_vec::*;
 
-//-----------------------------------------------------------------------------
+//----------------------------------------------------------------------------
 type size_t = usize;
 extern "C" {
-    fn memcpy(dest: *mut c_void, src: *const c_void, n: size_t) -> *mut c_void;
+    fn memcpy(des: *mut c_void, src: *const c_void, n: size_t) -> *mut c_void;
 }
 //-----------------------------------------------------------------------------
 // Need to move pointer to buffer element across threads
@@ -265,8 +266,8 @@ fn main() {
     // page aligned buffers are required for AVX2 copy
     let (src, mut dest) = if cfg!(feature = "aligned") {
         (
-            page_aligned_vec::<u8>(size, size, Some(init_value)),
-            page_aligned_vec::<u8>(size, size, Some(init_value)),
+            page_aligned_vec::<u8>(size, size, Some(init_value), false),
+            page_aligned_vec::<u8>(size, size, Some(init_value), false),
         )
     } else {
         (vec![init_value; size], vec![init_value; size])
@@ -309,33 +310,4 @@ fn main() {
         2. * (size as f64 / 0x40000000 as f64) / e,
         init_time
     );
-}
-//-----------------------------------------------------------------------------
-fn aligned_vec<T: Copy>(size: usize, capacity: usize, align: usize, touch: Option<T>) -> Vec<T> {
-    unsafe {
-        if size == 0 {
-            Vec::<T>::new()
-        } else {
-            let size = size * std::mem::size_of::<T>();
-            let capacity = (capacity * std::mem::size_of::<T>()).max(size);
-
-            let layout = std::alloc::Layout::from_size_align_unchecked(size, align);
-            let raw_ptr = std::alloc::alloc(layout) as *mut T;
-            if let Some(x) = touch {
-                let mut v = Vec::from_raw_parts(raw_ptr, size, capacity);
-                for i in (0..size).step_by(page_size::get()) {
-                    v[i] = x;
-                }
-                v
-            } else {
-                //SLOW!
-                //nix::sys::mman::mlock(raw_ptr as *const c_void, size).unwrap();
-                Vec::from_raw_parts(raw_ptr, size, capacity)
-            }
-        }
-    }
-}
-//-----------------------------------------------------------------------------
-fn page_aligned_vec<T: Copy>(size: usize, capacity: usize, touch: Option<T>) -> Vec<T> {
-    aligned_vec::<T>(size, capacity, page_size::get(), touch)
 }
