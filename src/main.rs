@@ -246,13 +246,16 @@ fn main() {
         .expect("Wrong number format");
     if size < page_size::get() {
         eprintln!(
-            "sise must be greater than or equal to page size ({})",
+            "size must be greater than or equal to page size ({})",
             page_size::get()
         );
         std::process::exit(1);
     }
     let num_threads = std::env::args()
         .nth(2)
+        .map_or(1, |a| a.parse::<usize>().expect("Wrong number format"));
+    let iterations = std::env::args()
+        .nth(3)
         .map_or(1, |a| a.parse::<usize>().expect("Wrong number format"));
     let init_value = 42_u8; // 0 results in an order of magnitude higher copy time and ~zero
                             // initialization time when using vec![]
@@ -269,24 +272,28 @@ fn main() {
         (vec![init_value; size], vec![init_value; size])
     };
     let init_time = t.elapsed().as_secs_f64();
-    println!("Copying...");
+    println!("Copying...({} iterations)", iterations);
     let e = if num_threads == 1 {
         let t = Instant::now();
-        if cfg!(feature = "trivial") {
-            println!("trivial");
-            cp(&src, &mut dest);
-        } else if cfg!(feature = "memcpy") {
-            cp2(&src, &mut dest);
-        } else if cfg!(feature = "simd") {
-            cp_simd(&src, &mut dest);
-        } else {
-            // default: copy_from_slice
-            cp(&src, &mut dest);
+        for _ in 0..iterations {
+            if cfg!(feature = "trivial") {
+                println!("trivial");
+                cp(&src, &mut dest);
+            } else if cfg!(feature = "memcpy") {
+                cp2(&src, &mut dest);
+            } else if cfg!(feature = "simd") {
+                cp_simd(&src, &mut dest);
+            } else {
+                // default: copy_from_slice
+                cp(&src, &mut dest);
+            }
         }
         t.elapsed().as_secs_f64()
     } else {
         let t = Instant::now();
-        par_cp(&src, &mut dest, num_threads);
+        for _ in 0..iterations {
+            par_cp(&src, &mut dest, num_threads);
+        }
         t.elapsed().as_secs_f64()
     };
     println!(
@@ -294,6 +301,7 @@ fn main() {
         page_size::get(),
         dest[page_size::get()]
     );
+    let e = e / iterations as f64;
     // R/W 2 * measured BW
     println!(
         "{:.0} ms, {:.2} GiB/s, init: {:.2} s",
