@@ -8,3 +8,9 @@ edition = "2021"
 [dependencies]
 page_size = "*"
 nix = "*"
+
+[features]
+aligned=[]
+trivial=[]
+memcpy=[]
+simd=[]

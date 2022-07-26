@@ -18,6 +18,11 @@ use std::ffi::*;
 use std::time::Instant;
 
 //-----------------------------------------------------------------------------
+type size_t = usize;
+extern "C" {
+    fn memcpy(dest: *mut c_void, src: *const c_void, n: size_t) -> *mut c_void;
+}
+//-----------------------------------------------------------------------------
 // Need to move pointer to buffer element across threads
 #[derive(Copy, Clone)]
 struct Movable<T>(*const T);
@@ -57,8 +62,16 @@ fn par_cp<T: 'static + Copy>(src: &[T], dst: &mut [T], n: usize) {
             // no difference in performance using memmcpy
             th.push(std::thread::spawn(move || {
                 let src = std::slice::from_raw_parts(s.get().unwrap(), cs);
-                let dst = std::slice::from_raw_parts_mut(d.get().unwrap(), cs);
-                dst.copy_from_slice(src);
+                let mut dst = std::slice::from_raw_parts_mut(d.get().unwrap(), cs);
+                if cfg!(feature = "simd") {
+                    if cfg!(feature = "aligned") {
+                        cp_simd(&src, &mut dst);
+                    } else {
+                        cp_simd_u(&src, &mut dst);
+                    }
+                } else {
+                    dst.copy_from_slice(src);
+                }
             }))
         }
     }
@@ -90,11 +103,13 @@ fn par_cp2<T: 'static + Copy>(src: &[T], dst: &mut [T], n: usize) {
     }
 }
 //-----------------------------------------------------------------------------
-type size_t = usize;
-extern "C" {
-    fn memcpy(dest: *mut c_void, src: *const c_void, n: size_t) -> *mut c_void;
-}
 fn cp(src: &[u8], dst: &mut [u8]) {
+    for i in 0..src.len() {
+        dst[i] = src[i];
+    }
+}
+//-----------------------------------------------------------------------------
+fn cp2(src: &[u8], dst: &mut [u8]) {
     unsafe {
         memcpy(
             dst.as_mut_ptr() as *mut c_void,
@@ -104,15 +119,66 @@ fn cp(src: &[u8], dst: &mut [u8]) {
     }
 }
 //-----------------------------------------------------------------------------
-fn cp2(src: &[u8], dst: &mut [u8]) {
+#[cfg(target_arch = "x86_64")]
+fn cp_simd_u<T: 'static + Copy>(src: &[T], dst: &mut [T]) {
+    for i in (0..src.len()).step_by(256) {
+        unsafe {
+            let d1 = dst.as_mut_ptr().offset(i as isize) as *mut std::arch::x86_64::__m256i;
+            let d2 = dst.as_mut_ptr().offset(i as isize + 32) as *mut std::arch::x86_64::__m256i;
+            let d3 = dst.as_mut_ptr().offset(i as isize + 64) as *mut std::arch::x86_64::__m256i;
+            let d4 = dst.as_mut_ptr().offset(i as isize + 96) as *mut std::arch::x86_64::__m256i;
+            let d5 = dst.as_mut_ptr().offset(i as isize + 128) as *mut std::arch::x86_64::__m256i;
+            let d6 = dst.as_mut_ptr().offset(i as isize + 160) as *mut std::arch::x86_64::__m256i;
+            let d7 = dst.as_mut_ptr().offset(i as isize + 192) as *mut std::arch::x86_64::__m256i;
+            let d8 = dst.as_mut_ptr().offset(i as isize + 224) as *mut std::arch::x86_64::__m256i;
+            let s1 = std::arch::x86_64::_mm256_loadu_si256(
+                src.as_ptr().offset(i as isize) as *const std::arch::x86_64::__m256i
+            );
+            let s2 = std::arch::x86_64::_mm256_loadu_si256(
+                src.as_ptr().offset(i as isize + 32) as *const std::arch::x86_64::__m256i
+            );
+            let s3 = std::arch::x86_64::_mm256_loadu_si256(
+                src.as_ptr().offset(i as isize + 64) as *const std::arch::x86_64::__m256i
+            );
+            let s4 = std::arch::x86_64::_mm256_loadu_si256(
+                src.as_ptr().offset(i as isize + 96) as *const std::arch::x86_64::__m256i
+            );
+            let s5 = std::arch::x86_64::_mm256_loadu_si256(
+                src.as_ptr().offset(i as isize + 128) as *const std::arch::x86_64::__m256i
+            );
+            let s6 = std::arch::x86_64::_mm256_loadu_si256(
+                src.as_ptr().offset(i as isize + 160) as *const std::arch::x86_64::__m256i
+            );
+            let s7 = std::arch::x86_64::_mm256_loadu_si256(
+                src.as_ptr().offset(i as isize + 192) as *const std::arch::x86_64::__m256i
+            );
+            let s8 = std::arch::x86_64::_mm256_loadu_si256(
+                src.as_ptr().offset(i as isize + 224) as *const std::arch::x86_64::__m256i
+            );
+            std::arch::x86_64::_mm256_storeu_si256(d1, s1);
+            std::arch::x86_64::_mm256_storeu_si256(d2, s2);
+            std::arch::x86_64::_mm256_storeu_si256(d3, s3);
+            std::arch::x86_64::_mm256_storeu_si256(d4, s4);
+            std::arch::x86_64::_mm256_storeu_si256(d5, s5);
+            std::arch::x86_64::_mm256_storeu_si256(d6, s6);
+            std::arch::x86_64::_mm256_storeu_si256(d7, s7);
+            std::arch::x86_64::_mm256_storeu_si256(d8, s8);
+        }
+    }
+}
+//-----------------------------------------------------------------------------
+fn cp3(src: &[u8], dst: &mut [u8]) {
     dst.copy_from_slice(src);
 }
 //-----------------------------------------------------------------------------
 #[cfg(target_arch = "x86_64")]
-fn cp_avx<T: 'static + Copy>(src: &[T], dst: &mut [T]) {
+fn cp_simd<T: 'static + Copy>(src: &[T], dst: &mut [T]) {
     let addr = src.as_ptr() as usize;
     if addr % page_size::get() != 0 || addr % 256 != 0 {
-        panic!("AVX2 copy requires memory to be aligned to page size and a multiple of 256");
+        panic!(
+            "AVX2 copy requires memory to be aligned to page size ({}) and a multiple of 256",
+            page_size::get()
+        );
     }
     //let base = 256;
     for i in (0..src.len()).step_by(256) {
@@ -178,6 +244,13 @@ fn main() {
         .expect("Missing buffer size")
         .parse::<usize>()
         .expect("Wrong number format");
+    if size < page_size::get() {
+        eprintln!(
+            "sise must be greater than or equal to page size ({})",
+            page_size::get()
+        );
+        std::process::exit(1);
+    }
     let num_threads = std::env::args()
         .nth(2)
         .map_or(1, |a| a.parse::<usize>().expect("Wrong number format"));
@@ -187,22 +260,40 @@ fn main() {
     let t = Instant::now();
     // same performance with standard initialisation and page aligned buffers;
     // page aligned buffers are required for AVX2 copy
-    //let src = vec![init_value; SIZE_U8];
-    //let mut dest = vec![init_value; SIZE_U8];
-    let src = page_aligned_vec::<u8>(size, size, Some(init_value));
-    let mut dest = page_aligned_vec::<u8>(size, size, Some(init_value));
+    let (src, mut dest) = if cfg!(feature = "aligned") {
+        (
+            page_aligned_vec::<u8>(size, size, Some(init_value)),
+            page_aligned_vec::<u8>(size, size, Some(init_value)),
+        )
+    } else {
+        (vec![init_value; size], vec![init_value; size])
+    };
     let init_time = t.elapsed().as_secs_f64();
     println!("Copying...");
     let e = if num_threads == 1 {
         let t = Instant::now();
-        cp2(&src, &mut dest);
+        if cfg!(feature = "trivial") {
+            println!("trivial");
+            cp(&src, &mut dest);
+        } else if cfg!(feature = "memcpy") {
+            cp2(&src, &mut dest);
+        } else if cfg!(feature = "simd") {
+            cp_simd(&src, &mut dest);
+        } else {
+            // default: copy_from_slice
+            cp(&src, &mut dest);
+        }
         t.elapsed().as_secs_f64()
     } else {
         let t = Instant::now();
-        par_cp2(&src, &mut dest, num_threads);
+        par_cp(&src, &mut dest, num_threads);
         t.elapsed().as_secs_f64()
     };
-    println!("output element at {}: {}", page_size::get(), dest[page_size::get()]);
+    println!(
+        "output element at {}: {}",
+        page_size::get(),
+        dest[page_size::get()]
+    );
     // R/W 2 * measured BW
     println!(
         "{:.0} ms, {:.2} GiB/s, init: {:.2} s",
@@ -212,12 +303,7 @@ fn main() {
     );
 }
 //-----------------------------------------------------------------------------
-fn aligned_vec<T: Copy>(
-    size: usize,
-    capacity: usize,
-    align: usize,
-    touch: Option<T>,
-) -> Vec<T> {
+fn aligned_vec<T: Copy>(size: usize, capacity: usize, align: usize, touch: Option<T>) -> Vec<T> {
     unsafe {
         if size == 0 {
             Vec::<T>::new()
